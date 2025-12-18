@@ -24,6 +24,15 @@
 		a.ko.Spec.PerformanceInsightsEnabled = func() *bool {a := false; return &a }()
 	}
 
+	// Set defaults for replication fields if not specified
+	if a.ko.Spec.BackupCrossRegionReplication != nil &&
+		*a.ko.Spec.BackupCrossRegionReplication {
+		if a.ko.Spec.BackupCrossRegionReplicationRetentionPeriod == nil {
+			defaultRetention := int64(7)
+			a.ko.Spec.BackupCrossRegionReplicationRetentionPeriod = &defaultRetention
+		}
+	}
+
 	// RDS will choose preferred engine minor version if only
 	// engine major version is provided and controler should not
 	// treat them as different, such as spec has 14, status has 14.1

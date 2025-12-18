@@ -605,3 +605,175 @@ func getCloudwatchLogExportsConfigDifferences(cloudwatchLogExportsConfigDesired 
 	}
 	return logsTypesToEnable, logsTypesToDisable
 }
+
+// manageCrossRegionBackupReplication handles enabling/disabling cross-region backup replication
+func (rm *resourceManager) manageCrossRegionBackupReplication(
+	ctx context.Context,
+	desired *resource,
+	latest *resource,
+	delta *ackcompare.Delta,
+) (err error) {
+	rlog := ackrtlog.FromContext(ctx)
+	exit := rlog.Trace("rm.manageCrossRegionBackupReplication")
+	defer func() { exit(err) }()
+
+	// Check if replication state changed
+	desiredEnabled := desired.ko.Spec.BackupCrossRegionReplication != nil &&
+		*desired.ko.Spec.BackupCrossRegionReplication
+	latestEnabled := latest.ko.Spec.BackupCrossRegionReplication != nil &&
+		*latest.ko.Spec.BackupCrossRegionReplication
+
+	// Enable replication
+	if desiredEnabled && !latestEnabled {
+		if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion == nil {
+			return fmt.Errorf("BackupCrossRegionReplicationDestinationRegion is required when BackupCrossRegionReplication is true")
+		}
+
+		if latest.ko.Status.ACKResourceMetadata == nil || latest.ko.Status.ACKResourceMetadata.ARN == nil {
+			return fmt.Errorf("DB instance ARN is required to enable cross-region backup replication")
+		}
+
+		sourceARN := string(*latest.ko.Status.ACKResourceMetadata.ARN)
+		input := &svcsdk.StartDBInstanceAutomatedBackupsReplicationInput{
+			SourceDBInstanceArn: &sourceARN,
+		}
+
+		// Set retention period (default 7)
+		retentionPeriod := int32(7)
+		if desired.ko.Spec.BackupCrossRegionReplicationRetentionPeriod != nil {
+			retentionPeriod = int32(*desired.ko.Spec.BackupCrossRegionReplicationRetentionPeriod)
+		}
+		input.BackupRetentionPeriod = &retentionPeriod
+
+		// Set KMS key ID if specified
+		if desired.ko.Spec.BackupCrossRegionReplicationKMSKeyID != nil {
+			input.KmsKeyId = desired.ko.Spec.BackupCrossRegionReplicationKMSKeyID
+		}
+
+		// Create a client for the destination region if specified
+		var apiClient *svcsdk.Client
+		if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
+			destRegion := string(*desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion)
+			destConfig := rm.clientcfg.Copy()
+			destConfig.Region = destRegion
+			apiClient = svcsdk.NewFromConfig(destConfig)
+		} else {
+			apiClient = rm.sdkapi
+		}
+
+		_, err := apiClient.StartDBInstanceAutomatedBackupsReplication(ctx, input)
+		rm.metrics.RecordAPICall("UPDATE", "StartDBInstanceAutomatedBackupsReplication", err)
+		if err != nil {
+			return err
+		}
+		destRegionStr := "current region"
+		if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
+			destRegionStr = *desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion
+		}
+		rlog.Info("Started cross-region backup replication", "destinationRegion", destRegionStr)
+		return nil
+	}
+
+	// Disable replication
+	if !desiredEnabled && latestEnabled {
+		// Check if there are active replications
+		if latest.ko.Status.DBInstanceAutomatedBackupsReplications == nil ||
+			len(latest.ko.Status.DBInstanceAutomatedBackupsReplications) == 0 {
+			rlog.Info("No active replication found to stop")
+			return nil
+		}
+
+		if latest.ko.Status.ACKResourceMetadata == nil || latest.ko.Status.ACKResourceMetadata.ARN == nil {
+			return fmt.Errorf("DB instance ARN is required to disable cross-region backup replication")
+		}
+
+		sourceARN := string(*latest.ko.Status.ACKResourceMetadata.ARN)
+		input := &svcsdk.StopDBInstanceAutomatedBackupsReplicationInput{
+			SourceDBInstanceArn: &sourceARN,
+		}
+
+		_, err := rm.sdkapi.StopDBInstanceAutomatedBackupsReplication(ctx, input)
+		rm.metrics.RecordAPICall("UPDATE", "StopDBInstanceAutomatedBackupsReplication", err)
+		if err != nil {
+			return err
+		}
+		rlog.Info("Stopped cross-region backup replication")
+		return nil
+	}
+
+	// Update replication parameters if replication is already enabled
+	if desiredEnabled && latestEnabled {
+		// Check if any parameters changed
+		if delta.DifferentAt("Spec.BackupCrossRegionReplicationRetentionPeriod") ||
+			delta.DifferentAt("Spec.BackupCrossRegionReplicationDestinationRegion") ||
+			delta.DifferentAt("Spec.BackupCrossRegionReplicationKMSKeyID") {
+			// Note: AWS doesn't support updating replication parameters directly.
+			// We need to stop and restart replication with new parameters.
+			rlog.Info("Replication parameter changes require stopping and restarting replication")
+
+			// Stop current replication
+			if latest.ko.Status.DBInstanceAutomatedBackupsReplications != nil &&
+				len(latest.ko.Status.DBInstanceAutomatedBackupsReplications) > 0 {
+				if latest.ko.Status.ACKResourceMetadata == nil || latest.ko.Status.ACKResourceMetadata.ARN == nil {
+					return fmt.Errorf("DB instance ARN is required to update cross-region backup replication")
+				}
+
+				sourceARN := string(*latest.ko.Status.ACKResourceMetadata.ARN)
+				stopInput := &svcsdk.StopDBInstanceAutomatedBackupsReplicationInput{
+					SourceDBInstanceArn: &sourceARN,
+				}
+				_, err := rm.sdkapi.StopDBInstanceAutomatedBackupsReplication(ctx, stopInput)
+				rm.metrics.RecordAPICall("UPDATE", "StopDBInstanceAutomatedBackupsReplication", err)
+				if err != nil {
+					return fmt.Errorf("failed to stop replication for update: %w", err)
+				}
+			}
+
+			// Start replication with new parameters
+			if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion == nil {
+				return fmt.Errorf("BackupCrossRegionReplicationDestinationRegion is required when BackupCrossRegionReplication is true")
+			}
+
+			sourceARN := string(*latest.ko.Status.ACKResourceMetadata.ARN)
+			startInput := &svcsdk.StartDBInstanceAutomatedBackupsReplicationInput{
+				SourceDBInstanceArn: &sourceARN,
+			}
+
+			// Set retention period (default 7)
+			retentionPeriod := int32(7)
+			if desired.ko.Spec.BackupCrossRegionReplicationRetentionPeriod != nil {
+				retentionPeriod = int32(*desired.ko.Spec.BackupCrossRegionReplicationRetentionPeriod)
+			}
+			startInput.BackupRetentionPeriod = &retentionPeriod
+
+			// Set KMS key ID if specified
+			if desired.ko.Spec.BackupCrossRegionReplicationKMSKeyID != nil {
+				startInput.KmsKeyId = desired.ko.Spec.BackupCrossRegionReplicationKMSKeyID
+			}
+
+			// Create a client for the destination region if specified
+			var apiClient *svcsdk.Client
+			if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
+				destRegion := string(*desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion)
+				destConfig := rm.clientcfg.Copy()
+				destConfig.Region = destRegion
+				apiClient = svcsdk.NewFromConfig(destConfig)
+			} else {
+				apiClient = rm.sdkapi
+			}
+
+			_, err := apiClient.StartDBInstanceAutomatedBackupsReplication(ctx, startInput)
+			rm.metrics.RecordAPICall("UPDATE", "StartDBInstanceAutomatedBackupsReplication", err)
+			if err != nil {
+				return fmt.Errorf("failed to restart replication with new parameters: %w", err)
+			}
+			destRegionStr := "current region"
+			if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
+				destRegionStr = *desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion
+			}
+			rlog.Info("Restarted cross-region backup replication with new parameters", "destinationRegion", destRegionStr)
+		}
+	}
+
+	return nil
+}

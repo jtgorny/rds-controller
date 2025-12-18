@@ -154,6 +154,17 @@ func (rm *resourceManager) Update(
 		// Should never happen... if it does, it's buggy code.
 		panic("resource manager's Update() method received resource with nil CR object")
 	}
+
+	// Handle cross-region backup replication before standard update
+	if delta.DifferentAt("Spec.BackupCrossRegionReplication") ||
+		delta.DifferentAt("Spec.BackupCrossRegionReplicationDestinationRegion") ||
+		delta.DifferentAt("Spec.BackupCrossRegionReplicationRetentionPeriod") ||
+		delta.DifferentAt("Spec.BackupCrossRegionReplicationKMSKeyID") {
+		if err := rm.manageCrossRegionBackupReplication(ctx, desired, latest, delta); err != nil {
+			return rm.onError(desired, err)
+		}
+	}
+
 	updated, err := rm.sdkUpdate(ctx, desired, latest, delta)
 	if err != nil {
 		if updated != nil {
