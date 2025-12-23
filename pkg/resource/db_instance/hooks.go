@@ -650,7 +650,8 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 			input.KmsKeyId = desired.ko.Spec.BackupCrossRegionReplicationKMSKeyID
 		}
 
-		// Create a client for the destination region if specified
+		// Create a client for the destination region
+		// The AWS SDK uses the client's configured region to determine where the API call targets
 		var apiClient *svcsdk.Client
 		if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
 			destRegion := string(*desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion)
@@ -751,7 +752,8 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 				startInput.KmsKeyId = desired.ko.Spec.BackupCrossRegionReplicationKMSKeyID
 			}
 
-			// Create a client for the destination region if specified
+			// Create a client for the destination region
+			// The AWS SDK uses the client's configured region to determine where the API call targets
 			var apiClient *svcsdk.Client
 			if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
 				destRegion := string(*desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion)
