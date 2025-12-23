@@ -109,6 +109,31 @@ func (rm *resourceManager) ReadOne(
 		}
 		return rm.onError(r, err)
 	}
+	
+	// Handle cross-region backup replication on every reconcile, even when there's no spec delta.
+	// This ensures we can enable replication once prerequisites (like automated backups) become active.
+	// Note: The resource passed to ReadOne() might be desired (in syncResource) or latest (in normal reconcile),
+	// but we check if BackupCrossRegionReplication is set and treat it as desired state.
+	if observed != nil {
+		observedResource := rm.concreteResource(observed)
+		// Use the resource passed in as desired state - if BackupCrossRegionReplication is set,
+		// it means we want to enable replication
+		delta := newResourceDelta(r, observedResource)
+		rlog := ackrtlog.FromContext(ctx)
+		rlog.Info("Calling manageCrossRegionBackupReplication from ReadOne",
+			"desiredBackupCrossRegionReplication", r.ko.Spec.BackupCrossRegionReplication,
+			"desiredBackupCrossRegionReplicationDestinationRegion", r.ko.Spec.BackupCrossRegionReplicationDestinationRegion)
+		if err := rm.manageCrossRegionBackupReplication(ctx, r, observedResource, delta); err != nil {
+			// Propagate requeue errors so the resource gets requeued when prerequisites aren't met
+			if _, ok := err.(*ackrequeue.RequeueNeededAfter); ok {
+				return observed, err
+			}
+			// For other errors, log but don't fail ReadOne - Update will handle them
+			// This allows the resource to continue reconciling even if replication can't be enabled yet
+			rlog.Info("manageCrossRegionBackupReplication returned error (non-fatal)", "error", err)
+		}
+	}
+	
 	return rm.onSuccess(observed)
 }
 
@@ -155,14 +180,16 @@ func (rm *resourceManager) Update(
 		panic("resource manager's Update() method received resource with nil CR object")
 	}
 
-	// Handle cross-region backup replication before standard update
-	if delta.DifferentAt("Spec.BackupCrossRegionReplication") ||
-		delta.DifferentAt("Spec.BackupCrossRegionReplicationDestinationRegion") ||
-		delta.DifferentAt("Spec.BackupCrossRegionReplicationRetentionPeriod") ||
-		delta.DifferentAt("Spec.BackupCrossRegionReplicationKMSKeyID") {
-		if err := rm.manageCrossRegionBackupReplication(ctx, desired, latest, delta); err != nil {
-			return rm.onError(desired, err)
-		}
+	// Handle cross-region backup replication before standard update. Run this on
+	// every reconcile so we can retry once prerequisites (like automated backups)
+	// become active, not only when a spec delta is detected.
+	rlog := ackrtlog.FromContext(ctx)
+	rlog.Info("Update() called, checking cross-region backup replication",
+		"desiredBackupCrossRegionReplication", desired.ko.Spec.BackupCrossRegionReplication,
+		"desiredBackupCrossRegionReplicationDestinationRegion", desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion,
+		"deltaHasSpec", delta.DifferentAt("Spec"))
+	if err := rm.manageCrossRegionBackupReplication(ctx, desired, latest, delta); err != nil {
+		return rm.onError(desired, err)
 	}
 
 	updated, err := rm.sdkUpdate(ctx, desired, latest, delta)

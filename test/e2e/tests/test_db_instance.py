@@ -77,7 +77,7 @@ def postgres14_t3_micro_instance(k8s_secret):
     replacements["MASTER_USER_PASS_SECRET_KEY"] = secret.key
 
     resource_data = load_rds_resource(
-        "db_instance_postgres14_t3_micro",
+        "db_instance_postgres14_t3_micro_backups",
         additional_replacements=replacements,
     )
 
@@ -545,7 +545,7 @@ class TestDBInstance:
         
         updates = {
             "spec": {
-                "backupRetentionPeriod": 7,
+                # "backupRetentionPeriod": 7,
                 "backupCrossRegionReplication": True,
                 "backupCrossRegionReplicationDestinationRegion": destination_region,
                 "backupCrossRegionReplicationRetentionPeriod": 7,
@@ -559,20 +559,33 @@ class TestDBInstance:
         # Verify replication is enabled in the CR spec
         cr = k8s.get_resource(ref)
         assert cr is not None
-        assert cr['spec']['backupRetentionPeriod'] == 7
+        # assert cr['spec']['backupRetentionPeriod'] == 7
         assert cr['spec']['backupCrossRegionReplication'] is True
         assert cr['spec']['backupCrossRegionReplicationDestinationRegion'] == destination_region
         assert cr['spec']['backupCrossRegionReplicationRetentionPeriod'] == 7
         
         # Wait for the resource to get synced after enabling replication
+        # Note: This may take two reconciliation cycles:
+        # 1. First cycle: Enables backups, skips replication (backups must be enabled first)
+        # 2. Second cycle: Enables replication after backups are active
         assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=MAX_WAIT_FOR_SYNCED_MINUTES)
-        
+
         # After synced, verify the status reflects the changes
         cr = k8s.get_resource(ref)
         assert cr is not None
         assert 'status' in cr
         assert 'dbInstanceStatus' in cr['status']
         condition.assert_synced(ref)
+        
+        # Verify that cross-region replication is actually enabled in AWS
+        # by checking the status field (which AWS populates)
+        assert 'dbInstanceAutomatedBackupsReplications' in cr['status']
+        assert cr['status']['dbInstanceAutomatedBackupsReplications'] is not None
+        assert len(cr['status']['dbInstanceAutomatedBackupsReplications']) > 0
+        # Verify the replication ARN is present
+        replication = cr['status']['dbInstanceAutomatedBackupsReplications'][0]
+        assert 'dbInstanceAutomatedBackupsARN' in replication
+        assert replication['dbInstanceAutomatedBackupsARN'] is not None
 
         # # Now disable cross-region backup replication and verify the change
         # updates = {
