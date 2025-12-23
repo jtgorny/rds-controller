@@ -614,9 +614,8 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 	delta *ackcompare.Delta,
 ) (err error) {
 	rlog := ackrtlog.FromContext(ctx)
-	rlog.Info("manageCrossRegionBackupReplication called")
 	exit := rlog.Trace("rm.manageCrossRegionBackupReplication")
-	defer func() { exit(err) }()
+	defer func(err error) { exit(err) }(err)
 
 	// Check if replication state changed
 	desiredEnabled := desired.ko.Spec.BackupCrossRegionReplication != nil &&
@@ -624,11 +623,6 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 	// Check status field because AWS doesn't populate the spec field
 	latestEnabled := latest.ko.Status.DBInstanceAutomatedBackupsReplications != nil &&
 		len(latest.ko.Status.DBInstanceAutomatedBackupsReplications) > 0
-
-	rlog.Debug("Cross-region backup replication check",
-		"desiredEnabled", desiredEnabled,
-		"latestEnabled", latestEnabled,
-		"shouldEnable", desiredEnabled && !latestEnabled)
 
 	// Enable replication
 	if desiredEnabled && !latestEnabled {
@@ -692,28 +686,20 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 		// Create a client for the destination region
 		// The AWS SDK uses the client's configured region to determine where the API call targets
 		var apiClient *svcsdk.Client
-		destRegionStr := "current region"
 		if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
 			destRegion := string(*desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion)
 			destConfig := rm.clientcfg.Copy()
 			destConfig.Region = destRegion
 			apiClient = svcsdk.NewFromConfig(destConfig)
-			destRegionStr = destRegion
-			rlog.Info("Created RDS client for destination region", "destinationRegion", destRegion)
 		} else {
 			apiClient = rm.sdkapi
-			rlog.Info("Using default RDS client (no destination region specified)")
 		}
 
-		rlog.Info("Calling StartDBInstanceAutomatedBackupsReplication",
-			"destinationRegion", destRegionStr,
-			"sourceARN", sourceARN)
 		_, err := apiClient.StartDBInstanceAutomatedBackupsReplication(ctx, input)
 		rm.metrics.RecordAPICall("UPDATE", "StartDBInstanceAutomatedBackupsReplication", err)
 		if err != nil {
 			return err
 		}
-		rlog.Info("Started cross-region backup replication", "destinationRegion", destRegionStr)
 		return nil
 	}
 

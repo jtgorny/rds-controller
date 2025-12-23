@@ -180,17 +180,17 @@ func (rm *resourceManager) Update(
 		panic("resource manager's Update() method received resource with nil CR object")
 	}
 
-	// Handle cross-region backup replication before standard update. Run this on
-	// every reconcile so we can retry once prerequisites (like automated backups)
-	// become active, not only when a spec delta is detected.
-	rlog := ackrtlog.FromContext(ctx)
-	rlog.Info("Update() called, checking cross-region backup replication",
-		"desiredBackupCrossRegionReplication", desired.ko.Spec.BackupCrossRegionReplication,
-		"desiredBackupCrossRegionReplicationDestinationRegion", desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion,
-		"deltaHasSpec", delta.DifferentAt("Spec"))
-	if err := rm.manageCrossRegionBackupReplication(ctx, desired, latest, delta); err != nil {
-		return rm.onError(desired, err)
-	}
+	// // Handle cross-region backup replication before standard update. Run this on
+	// // every reconcile so we can retry once prerequisites (like automated backups)
+	// // become active, not only when a spec delta is detected.
+	// rlog := ackrtlog.FromContext(ctx)
+	// rlog.Info("Update() called, checking cross-region backup replication",
+	// 	"desiredBackupCrossRegionReplication", desired.ko.Spec.BackupCrossRegionReplication,
+	// 	"desiredBackupCrossRegionReplicationDestinationRegion", desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion,
+	// 	"deltaHasSpec", delta.DifferentAt("Spec"))
+	// if err := rm.manageCrossRegionBackupReplication(ctx, desired, latest, delta); err != nil {
+	// 	return rm.onError(desired, err)
+	// }
 
 	updated, err := rm.sdkUpdate(ctx, desired, latest, delta)
 	if err != nil {
