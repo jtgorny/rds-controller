@@ -7,6 +7,9 @@ spec:
   # Disable automated backups since it adds time to the provisioning
   # workflow...
   backupRetentionPeriod: 7
+  backupCrossRegionReplication: true
+  backupCrossRegionReplicationDestinationRegion: us-east-2
+  backupCrossRegionReplicationRetentionPeriod: 7
   copyTagsToSnapshot: $COPY_TAGS_TO_SNAPSHOT
   dbInstanceClass: db.t3.micro
   dbInstanceIdentifier: $DB_INSTANCE_ID

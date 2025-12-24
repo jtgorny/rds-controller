@@ -77,7 +77,8 @@ def postgres14_t3_micro_instance(k8s_secret):
     replacements["MASTER_USER_PASS_SECRET_KEY"] = secret.key
 
     resource_data = load_rds_resource(
-        "db_instance_postgres14_t3_micro_backups",
+        "db_instance_postgres14_t3_micro",
+        # "db_instance_postgres14_t3_micro_backups",
         additional_replacements=replacements,
     )
 
@@ -508,7 +509,6 @@ class TestDBInstance:
     def test_crud_postgres14_cross_region_backup_replication(
             self,
             postgres14_t3_micro_instance,
-            k8s_secret,
     ):
         (ref, cr, _) = postgres14_t3_micro_instance
         db_instance_id = cr["spec"]["dbInstanceIdentifier"]
@@ -600,79 +600,106 @@ class TestDBInstance:
         assert cr is not None
         condition.assert_synced(ref)
 
-    # def test_crud_postgres14_cross_region_backup_replication_at_creation(
-    #         self,
-    #         postgres14_t3_micro_instance,
-    # ):
-    #     """Test creating DB instance with cross-region backup replication enabled from the start"""
-    #     import boto3
+    def test_crud_postgres14_cross_region_backup_replication_at_creation(
+            self,
+            k8s_secret,
+    ):
+        """Test creating DB instance with cross-region backup replication enabled from the start"""
+        import boto3
         
-    #     db_instance_id = random_suffix_name("pg14-cross-region-at-creation", 20)
-    #     secret = k8s_secret(
-    #         MUP_NS,
-    #         random_suffix_name(MUP_SEC_NAME_PREFIX, 32),
-    #         MUP_SEC_KEY,
-    #         MUP_SEC_VAL,
-    #     )
+        db_instance_id = random_suffix_name("pg14-crr-creation", 20)
+        secret = k8s_secret(
+            MUP_NS,
+            random_suffix_name(MUP_SEC_NAME_PREFIX, 32),
+            MUP_SEC_KEY,
+            MUP_SEC_VAL,
+        )
 
-    #     # Get the current AWS region to use as destination
-    #     rds_client = boto3.client('rds')
-    #     current_region = rds_client.meta.region_name
+        # Get the current AWS region and set destination region dynamically
+        rds_client = boto3.client('rds')
+        current_region = rds_client.meta.region_name
+        destination_region = 'us-east-2' if current_region == 'us-east-1' else 'us-east-1'
 
-    #     replacements = REPLACEMENT_VALUES.copy()
-    #     replacements['COPY_TAGS_TO_SNAPSHOT'] = "False"
-    #     replacements["DB_INSTANCE_ID"] = db_instance_id
-    #     replacements["MASTER_USER_PASS_SECRET_NAMESPACE"] = secret.ns
-    #     replacements["MASTER_USER_PASS_SECRET_NAME"] = secret.name
-    #     replacements["MASTER_USER_PASS_SECRET_KEY"] = secret.key
+        replacements = REPLACEMENT_VALUES.copy()
+        replacements['COPY_TAGS_TO_SNAPSHOT'] = "False"
+        replacements["DB_INSTANCE_ID"] = db_instance_id
+        replacements["MASTER_USER_PASS_SECRET_NAMESPACE"] = secret.ns
+        replacements["MASTER_USER_PASS_SECRET_NAME"] = secret.name
+        replacements["MASTER_USER_PASS_SECRET_KEY"] = secret.key
 
-    #     resource_data = load_rds_resource(
-    #         "db_instance_postgres14_cross_region_backup",
-    #         additional_replacements=replacements,
-    #     )
+        resource_data = load_rds_resource(
+            "db_instance_postgres14_t3_micro_backups",
+            additional_replacements=replacements,
+        )
         
-    #     # Enable replication in the resource data
-    #     resource_data["spec"]["backupRetentionPeriod"] = 7
-    #     resource_data["spec"]["backupCrossRegionReplication"] = True
-    #     resource_data["spec"]["backupCrossRegionReplicationDestinationRegion"] = current_region
-    #     resource_data["spec"]["backupCrossRegionReplicationRetentionPeriod"] = 7
+        # Override destination region to match current test region
+        resource_data["spec"]["backupCrossRegionReplicationDestinationRegion"] = destination_region
 
-    #     # Create the k8s resource
-    #     ref = k8s.CustomResourceReference(
-    #         CRD_GROUP, CRD_VERSION, RESOURCE_PLURAL,
-    #         db_instance_id, namespace="default",
-    #     )
-    #     k8s.create_custom_resource(ref, resource_data)
-    #     cr = k8s.wait_resource_consumed_by_controller(ref)
+        # Create the k8s resource
+        ref = k8s.CustomResourceReference(
+            CRD_GROUP, CRD_VERSION, RESOURCE_PLURAL,
+            db_instance_id, namespace="default",
+        )
+        k8s.create_custom_resource(ref, resource_data)
+        cr = k8s.wait_resource_consumed_by_controller(ref)
 
-    #     assert cr is not None
-    #     assert k8s.get_resource_exists(ref)
+        assert cr is not None
+        assert k8s.get_resource_exists(ref)
         
-    #     # Verify replication fields are set in the CR spec
-    #     assert cr['spec']['backupRetentionPeriod'] == 7
-    #     assert cr['spec']['backupCrossRegionReplication'] is True
-    #     assert cr['spec']['backupCrossRegionReplicationDestinationRegion'] == current_region
-    #     assert cr['spec']['backupCrossRegionReplicationRetentionPeriod'] == 7
-
-    #     # Wait for the resource to get synced
-    #     assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=MAX_WAIT_FOR_SYNCED_MINUTES)
-
-    #     # Verify DB instance is available
-    #     latest = db_instance.get(db_instance_id)
-    #     assert latest is not None
-    #     assert latest['DBInstanceStatus'] == 'available'
+        assert 'status' in cr
+        assert 'dbInstanceStatus' in cr['status']
+        assert cr['status']['dbInstanceStatus'] == 'creating'
+        condition.assert_not_synced(ref)
         
-    #     # Verify replication is still enabled in the CR spec after sync
-    #     cr = k8s.get_resource(ref)
-    #     assert cr is not None
-    #     assert cr['spec']['backupRetentionPeriod'] == 7
-    #     assert cr['spec']['backupCrossRegionReplication'] is True
-    #     assert cr['spec']['backupCrossRegionReplicationDestinationRegion'] == current_region
-    #     assert cr['spec']['backupCrossRegionReplicationRetentionPeriod'] == 7
+        # Verify replication fields are set in the CR spec
+        assert cr['spec']['backupCrossRegionReplication'] is True
+        assert cr['spec']['backupCrossRegionReplicationDestinationRegion'] == destination_region
 
-    #     # Cleanup
-    #     try:
-    #         _, deleted = k8s.delete_custom_resource(ref, 3, 10)
-    #     except:
-    #         pass
-    #     db_instance.wait_until_deleted(db_instance_id)
+        # Wait for the resource to get synced (this ensures CreateDBInstance completed)
+        assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=MAX_WAIT_FOR_SYNCED_MINUTES)
+
+        # After the resource is synced, assert that DBInstanceStatus is available
+        latest = db_instance.get(db_instance_id)
+        assert latest is not None
+        assert latest['DBInstanceStatus'] == 'available'
+
+        cr = k8s.get_resource(ref)
+        assert cr is not None
+        assert 'status' in cr
+        assert 'dbInstanceStatus' in cr['status']
+        assert cr['status']['dbInstanceStatus'] != 'creating'
+        condition.assert_synced(ref)
+        
+        # Wait for StartDBInstanceAutomatedBackupsReplication to complete
+        # This happens after CreateDBInstance completes, so we need to wait for
+        # the replication status to be populated in the CR status field
+        import datetime
+        timeout = datetime.datetime.now() + datetime.timedelta(minutes=MAX_WAIT_FOR_SYNCED_MINUTES * 2)
+        replication_active = False
+        while datetime.datetime.now() < timeout:
+            cr = k8s.get_resource(ref)
+            if cr and 'status' in cr and 'dbInstanceAutomatedBackupsReplications' in cr['status']:
+                replications = cr['status']['dbInstanceAutomatedBackupsReplications']
+                if replications and len(replications) > 0:
+                    replication_active = True
+                    break
+            time.sleep(15)  # Check every 15 seconds
+        
+        assert replication_active, (
+            "Cross-region backup replication did not become active within timeout. "
+            "StartDBInstanceAutomatedBackupsReplication may not have been called or completed."
+        )
+        
+        # Verify the replication status is populated
+        cr = k8s.get_resource(ref)
+        assert cr is not None
+        assert 'status' in cr
+        assert 'dbInstanceAutomatedBackupsReplications' in cr['status']
+        replications = cr['status']['dbInstanceAutomatedBackupsReplications']
+        assert replications is not None
+        assert len(replications) > 0
+        # Verify the replication ARN contains the destination region
+        replication_arn = replications[0].get('dbInstanceAutomatedBackupsARN', '')
+        assert destination_region in replication_arn, (
+            f"Replication ARN {replication_arn} should contain destination region {destination_region}"
+        )
