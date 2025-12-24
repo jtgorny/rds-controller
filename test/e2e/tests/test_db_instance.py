@@ -572,57 +572,33 @@ class TestDBInstance:
         assert 'dbInstanceStatus' in cr['status']
         condition.assert_synced(ref)
         
-        # Verify that cross-region replication is actually enabled in AWS
-        # by checking the status field (which AWS populates)
-        # Note: AWS may take some time to populate this field after starting replication,
-        # so we wait for it to appear with retries
-        # wait_periods = MAX_WAIT_FOR_SYNCED_MINUTES
-        # period_length = 10  # seconds
-        # for i in range(wait_periods):
-        #     cr = k8s.get_resource(ref)
-        #     if (cr is not None and 
-        #         'status' in cr and 
-        #         'dbInstanceAutomatedBackupsReplications' in cr['status'] and
-        #         cr['status']['dbInstanceAutomatedBackupsReplications'] is not None and
-        #         len(cr['status']['dbInstanceAutomatedBackupsReplications']) > 0):
-        #         break
-        #     if i < wait_periods - 1:
-        #         time.sleep(period_length)
+        # Wait a bit longer to ensure replication status is populated before disabling
+        # This gives AWS time to propagate the replication status
+        time.sleep(MODIFY_WAIT_AFTER_SECONDS)
+    
+        # Now disable cross-region backup replication and verify the change
+        updates = {
+            "spec": {
+                "backupCrossRegionReplication": False,
+            },
+        }
         
-        # # Now verify the replication details
-        # assert cr is not None
-        # assert 'status' in cr
-        # assert 'dbInstanceAutomatedBackupsReplications' in cr['status']
-        # assert cr['status']['dbInstanceAutomatedBackupsReplications'] is not None
-        # assert len(cr['status']['dbInstanceAutomatedBackupsReplications']) > 0
-        # # Verify the replication ARN is present
-        # replication = cr['status']['dbInstanceAutomatedBackupsReplications'][0]
-        # assert 'dbInstanceAutomatedBackupsARN' in replication
-        # assert replication['dbInstanceAutomatedBackupsARN'] is not None
-
-        # # Now disable cross-region backup replication and verify the change
-        # updates = {
-        #     "spec": {
-        #         "backupCrossRegionReplication": False,
-        #     },
-        # }
+        k8s.patch_custom_resource(ref, updates)
+        time.sleep(MODIFY_WAIT_AFTER_SECONDS)
+        condition.assert_not_synced(ref)
         
-        # k8s.patch_custom_resource(ref, updates)
-        # time.sleep(MODIFY_WAIT_AFTER_SECONDS)
-        # condition.assert_not_synced(ref)
+        cr = k8s.get_resource(ref)
+        assert cr is not None
+        assert 'spec' in cr
+        assert cr['spec']['backupCrossRegionReplication'] is False
         
-        # cr = k8s.get_resource(ref)
-        # assert cr is not None
-        # assert 'spec' in cr
-        # assert cr['spec']['backupCrossRegionReplication'] is False
+        # Wait for the resource to get synced after disabling replication
+        assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=MAX_WAIT_FOR_SYNCED_MINUTES)
         
-        # # Wait for the resource to get synced after disabling replication
-        # assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=MAX_WAIT_FOR_SYNCED_MINUTES)
-        
-        # # Verify the CR is synced and replication is disabled
-        # cr = k8s.get_resource(ref)
-        # assert cr is not None
-        # condition.assert_synced(ref)
+        # Verify the CR is synced and replication is disabled
+        cr = k8s.get_resource(ref)
+        assert cr is not None
+        condition.assert_synced(ref)
 
     # def test_crud_postgres14_cross_region_backup_replication_at_creation(
     #         self,

@@ -695,51 +695,87 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 			apiClient = rm.sdkapi
 		}
 
+		// Start must be called in the destination region
 		_, err := apiClient.StartDBInstanceAutomatedBackupsReplication(ctx, input)
 		rm.metrics.RecordAPICall("UPDATE", "StartDBInstanceAutomatedBackupsReplication", err)
 		if err != nil {
+			// // Handle idempotent case: if replication is already enabled, treat as success
+			// errMsg := err.Error()
+			// if strings.Contains(errMsg, "already replicating") {
+			// 	rlog.Info("Replication already enabled, treating as success")
+			// 	return nil
+			// }
 			return err
 		}
 		return nil
+		// // Requeue to wait for status to update after starting replication
+		// rlog.Info("Started cross-region backup replication, requeuing to wait for status update")
+		// return ackrequeue.NeededAfter(
+		// 	errors.New("waiting for replication status to update"),
+		// 	ackrequeue.DefaultRequeueAfterDuration,
+		// )
 	}
 
-	// // Disable replication
-	// if !desiredEnabled && latestEnabled {
-	// 	// Check if there are active replications
-	// 	if latest.ko.Status.DBInstanceAutomatedBackupsReplications == nil ||
-	// 		len(latest.ko.Status.DBInstanceAutomatedBackupsReplications) == 0 {
-	// 		rlog.Info("No active replication found to stop")
-	// 		return nil
-	// 	}
+	// Disable replication
+	if !desiredEnabled && latestEnabled {
+		// Check if there are active replications
+		if latest.ko.Status.DBInstanceAutomatedBackupsReplications == nil ||
+			len(latest.ko.Status.DBInstanceAutomatedBackupsReplications) == 0 {
+			rlog.Info("No active replication found to stop")
+			return nil
+		}
 
-	// 	if latest.ko.Status.ACKResourceMetadata == nil || latest.ko.Status.ACKResourceMetadata.ARN == nil {
-	// 		return fmt.Errorf("DB instance ARN is required to disable cross-region backup replication")
-	// 	}
+		if latest.ko.Status.ACKResourceMetadata == nil || latest.ko.Status.ACKResourceMetadata.ARN == nil {
+			return fmt.Errorf("DB instance ARN is required to disable cross-region backup replication")
+		}
 
-	// 	sourceARN := string(*latest.ko.Status.ACKResourceMetadata.ARN)
-	// 	input := &svcsdk.StopDBInstanceAutomatedBackupsReplicationInput{
-	// 		SourceDBInstanceArn: &sourceARN,
-	// 	}
+		// Extract destination region from replication ARN in status
+		// Format: arn:aws:rds:REGION:account:auto-backup:...
+		destRegion := ""
+		if len(latest.ko.Status.DBInstanceAutomatedBackupsReplications) > 0 &&
+			latest.ko.Status.DBInstanceAutomatedBackupsReplications[0].DBInstanceAutomatedBackupsARN != nil {
+			replicationARN := *latest.ko.Status.DBInstanceAutomatedBackupsReplications[0].DBInstanceAutomatedBackupsARN
+			arnParts := strings.Split(replicationARN, ":")
+			if len(arnParts) >= 4 {
+				destRegion = arnParts[3]
+			}
+		}
 
-	// 	// Stop must be called in the destination region (this is not true)
-	// 	var stopClient *svcsdk.Client
-	// 	if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
-	// 		destRegion := string(*desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion)
-	// 		destConfig := rm.clientcfg.Copy()
-	// 		destConfig.Region = destRegion
-	// 		stopClient = svcsdk.NewFromConfig(destConfig)
-	// 	} else {
-	// 		stopClient = rm.sdkapi
-	// 	}
+		// Fallback to spec field if available
+		if destRegion == "" && desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
+			destRegion = string(*desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion)
+		}
 
-	// 	_, err := stopClient.StopDBInstanceAutomatedBackupsReplication(ctx, input)
-	// 	rm.metrics.RecordAPICall("UPDATE", "StopDBInstanceAutomatedBackupsReplication", err)
-	// 	if err != nil {
-	// 		return err
-	// 	}
-	// 	rlog.Info("Stopped cross-region backup replication")
-	// 	return nil
-	// }
+		if destRegion == "" {
+			return fmt.Errorf("could not determine destination region for stopping replication")
+		}
+
+		sourceARN := string(*latest.ko.Status.ACKResourceMetadata.ARN)
+		input := &svcsdk.StopDBInstanceAutomatedBackupsReplicationInput{
+			SourceDBInstanceArn: &sourceARN,
+		}
+
+		// Create a client for the destination region
+		// Stop must be called from the destination region
+		destConfig := rm.clientcfg.Copy()
+		destConfig.Region = destRegion
+		stopClient := svcsdk.NewFromConfig(destConfig)
+
+		_, err := stopClient.StopDBInstanceAutomatedBackupsReplication(ctx, input)
+		rm.metrics.RecordAPICall("UPDATE", "StopDBInstanceAutomatedBackupsReplication", err)
+		if err != nil {
+			// // Handle idempotent case: if replication is not active, treat as success
+			// // This can happen if replication was already stopped or status hasn't propagated yet
+			// errMsg := err.Error()
+			// if strings.Contains(errMsg, "not replicating") {
+			// 	rlog.Info("Replication already stopped or not active, treating as success")
+			// 	return nil
+			// }
+			return err
+		}
+		rlog.Info("Stopped cross-region backup replication")
+		return nil
+	}
 
 	// Update replication parameters if replication is already enabled
 	// if desiredEnabled && latestEnabled {

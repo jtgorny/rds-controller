@@ -110,6 +110,7 @@ func (rm *resourceManager) ReadOne(
 		return rm.onError(r, err)
 	}
 	
+	// TODO: This is getting double called maybe potentially due to a requeue
 	// Handle cross-region backup replication on every reconcile, even when there's no spec delta.
 	// This ensures we can enable replication once prerequisites (like automated backups) become active.
 	// Note: The resource passed to ReadOne() might be desired (in syncResource) or latest (in normal reconcile),
