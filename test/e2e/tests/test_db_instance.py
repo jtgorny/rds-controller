@@ -78,7 +78,48 @@ def postgres14_t3_micro_instance(k8s_secret):
 
     resource_data = load_rds_resource(
         "db_instance_postgres14_t3_micro",
-        # "db_instance_postgres14_t3_micro_backups",
+        additional_replacements=replacements,
+    )
+
+    # Create the k8s resource
+    ref = k8s.CustomResourceReference(
+        CRD_GROUP, CRD_VERSION, RESOURCE_PLURAL,
+        db_instance_id, namespace="default",
+    )
+    k8s.create_custom_resource(ref, resource_data)
+    cr = k8s.wait_resource_consumed_by_controller(ref)
+
+    assert cr is not None
+    assert k8s.get_resource_exists(ref)
+
+    yield (ref, cr, secret.name)
+
+    # Try to delete, if doesn't already exist
+    try:
+        _, deleted = k8s.delete_custom_resource(ref, 3, 10)
+    except:
+        pass
+    db_instance.wait_until_deleted(db_instance_id)
+
+@pytest.fixture
+def postgres14_t3_micro_instance_backups(k8s_secret):
+    db_instance_id = random_suffix_name("pg14-t3-micro", 20)
+    secret = k8s_secret(
+        MUP_NS,
+        random_suffix_name(MUP_SEC_NAME_PREFIX, 32),
+        MUP_SEC_KEY,
+        MUP_SEC_VAL,
+    )
+
+    replacements = REPLACEMENT_VALUES.copy()
+    replacements['COPY_TAGS_TO_SNAPSHOT'] = "False"
+    replacements["DB_INSTANCE_ID"] = db_instance_id
+    replacements["MASTER_USER_PASS_SECRET_NAMESPACE"] = secret.ns
+    replacements["MASTER_USER_PASS_SECRET_NAME"] = secret.name
+    replacements["MASTER_USER_PASS_SECRET_KEY"] = secret.key
+
+    resource_data = load_rds_resource(
+        "db_instance_postgres14_t3_micro_backups",
         additional_replacements=replacements,
     )
 
@@ -602,49 +643,11 @@ class TestDBInstance:
 
     def test_crud_postgres14_cross_region_backup_replication_at_creation(
             self,
-            k8s_secret,
+            postgres14_t3_micro_instance_backups,
     ):
-        """Test creating DB instance with cross-region backup replication enabled from the start"""
-        import boto3
-        
-        db_instance_id = random_suffix_name("pg14-crr-creation", 20)
-        secret = k8s_secret(
-            MUP_NS,
-            random_suffix_name(MUP_SEC_NAME_PREFIX, 32),
-            MUP_SEC_KEY,
-            MUP_SEC_VAL,
-        )
-
-        # Get the current AWS region and set destination region dynamically
-        rds_client = boto3.client('rds')
-        current_region = rds_client.meta.region_name
-        destination_region = 'us-east-2' if current_region == 'us-east-1' else 'us-east-1'
-
-        replacements = REPLACEMENT_VALUES.copy()
-        replacements['COPY_TAGS_TO_SNAPSHOT'] = "False"
-        replacements["DB_INSTANCE_ID"] = db_instance_id
-        replacements["MASTER_USER_PASS_SECRET_NAMESPACE"] = secret.ns
-        replacements["MASTER_USER_PASS_SECRET_NAME"] = secret.name
-        replacements["MASTER_USER_PASS_SECRET_KEY"] = secret.key
-
-        resource_data = load_rds_resource(
-            "db_instance_postgres14_t3_micro_backups",
-            additional_replacements=replacements,
-        )
-        
-        # Override destination region to match current test region
-        resource_data["spec"]["backupCrossRegionReplicationDestinationRegion"] = destination_region
-
-        # Create the k8s resource
-        ref = k8s.CustomResourceReference(
-            CRD_GROUP, CRD_VERSION, RESOURCE_PLURAL,
-            db_instance_id, namespace="default",
-        )
-        k8s.create_custom_resource(ref, resource_data)
-        cr = k8s.wait_resource_consumed_by_controller(ref)
-
-        assert cr is not None
-        assert k8s.get_resource_exists(ref)
+        (ref, cr, _) = postgres14_t3_micro_instance_backups
+        db_instance_id = cr["spec"]["dbInstanceIdentifier"]
+        destination_region = cr["spec"]["backupCrossRegionReplicationDestinationRegion"]
         
         assert 'status' in cr
         assert 'dbInstanceStatus' in cr['status']

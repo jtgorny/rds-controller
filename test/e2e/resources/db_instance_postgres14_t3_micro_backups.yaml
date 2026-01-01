@@ -4,8 +4,6 @@ metadata:
   name: $DB_INSTANCE_ID
 spec:
   allocatedStorage: 5
-  # Disable automated backups since it adds time to the provisioning
-  # workflow...
   backupRetentionPeriod: 7
   backupCrossRegionReplication: true
   backupCrossRegionReplicationDestinationRegion: us-east-2
