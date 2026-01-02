@@ -645,6 +645,13 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 			desiredBackupRetentionPeriod = *desired.ko.Spec.BackupRetentionPeriod
 		}
 
+		// Check for pending backup retention period changes
+		pendingBackupRetentionPeriod := int64(-1)
+		if latest.ko.Status.PendingModifiedValues != nil &&
+			latest.ko.Status.PendingModifiedValues.BackupRetentionPeriod != nil {
+			pendingBackupRetentionPeriod = *latest.ko.Status.PendingModifiedValues.BackupRetentionPeriod
+		}
+
 		// If backups status is unknown, wait for late-init/read to populate.
 		if latestBackupRetentionPeriod < 0 {
 			rlog.Info("BackupRetentionPeriod not yet observed; waiting before enabling cross-region backup replication")
@@ -654,16 +661,29 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 			)
 		}
 
-		// If backups are not yet active, requeue until they are.
+		// If backups are not yet active, check if they're being enabled.
+		// If backupRetentionPeriod is being modified (pending), wait for that to complete.
+		// Otherwise, allow reconciliation to continue so Update() can call ModifyDBInstance.
 		if latestBackupRetentionPeriod == 0 {
 			if desiredBackupRetentionPeriod <= 0 {
 				return fmt.Errorf("automated backups must be enabled (backupRetentionPeriod > 0) before enabling cross-region backup replication")
 			}
-			rlog.Info("Waiting for automated backups to become active before enabling cross-region backup replication")
-			return ackrequeue.NeededAfter(
-				errors.New("automated backups not yet active"),
-				ackrequeue.DefaultRequeueAfterDuration,
-			)
+			// If backups are pending (being modified), wait for that to complete
+			if pendingBackupRetentionPeriod > 0 {
+				rlog.Info("Waiting for pending backup retention period modification to complete before enabling cross-region backup replication",
+					"pendingBackupRetentionPeriod", pendingBackupRetentionPeriod)
+				return ackrequeue.NeededAfter(
+					errors.New("backup retention period modification pending"),
+					ackrequeue.DefaultRequeueAfterDuration,
+				)
+			}
+			// Backups are not active and not pending - allow reconciliation to continue
+			// so Update() can be called to enable backups via ModifyDBInstance.
+			// Don't return an error here, as that would prevent Update() from being called.
+			// Note: If BackupRetentionPeriod is in the delta, Update() will call ModifyDBInstance.
+			// On the next reconciliation, PendingModifiedValues will be populated and we'll requeue.
+			rlog.Info("Automated backups not yet active; allowing reconciliation to continue so ModifyDBInstance can enable backups")
+			return nil
 		}
 
 		sourceARN := string(*latest.ko.Status.ACKResourceMetadata.ARN)
@@ -699,21 +719,15 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 		_, err := apiClient.StartDBInstanceAutomatedBackupsReplication(ctx, input)
 		rm.metrics.RecordAPICall("UPDATE", "StartDBInstanceAutomatedBackupsReplication", err)
 		if err != nil {
-			// // Handle idempotent case: if replication is already enabled, treat as success
-			// errMsg := err.Error()
-			// if strings.Contains(errMsg, "already replicating") {
-			// 	rlog.Info("Replication already enabled, treating as success")
-			// 	return nil
-			// }
+			// Handle idempotent case: if replication is already enabled, treat as success
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "already replicating") {
+				rlog.Info("Replication already enabled, treating as success")
+				return nil
+			}
 			return err
 		}
 		return nil
-		// // Requeue to wait for status to update after starting replication
-		// rlog.Info("Started cross-region backup replication, requeuing to wait for status update")
-		// return ackrequeue.NeededAfter(
-		// 	errors.New("waiting for replication status to update"),
-		// 	ackrequeue.DefaultRequeueAfterDuration,
-		// )
 	}
 
 	// Disable replication
@@ -730,7 +744,6 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 		}
 
 		// Extract destination region from replication ARN in status
-		// Format: arn:aws:rds:REGION:account:auto-backup:...
 		destRegion := ""
 		if len(latest.ko.Status.DBInstanceAutomatedBackupsReplications) > 0 &&
 			latest.ko.Status.DBInstanceAutomatedBackupsReplications[0].DBInstanceAutomatedBackupsARN != nil {
@@ -755,7 +768,6 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 			SourceDBInstanceArn: &sourceARN,
 		}
 
-		// Create a client for the destination region
 		// Stop must be called from the destination region
 		destConfig := rm.clientcfg.Copy()
 		destConfig.Region = destRegion
@@ -764,105 +776,17 @@ func (rm *resourceManager) manageCrossRegionBackupReplication(
 		_, err := stopClient.StopDBInstanceAutomatedBackupsReplication(ctx, input)
 		rm.metrics.RecordAPICall("UPDATE", "StopDBInstanceAutomatedBackupsReplication", err)
 		if err != nil {
-			// // Handle idempotent case: if replication is not active, treat as success
-			// // This can happen if replication was already stopped or status hasn't propagated yet
-			// errMsg := err.Error()
-			// if strings.Contains(errMsg, "not replicating") {
-			// 	rlog.Info("Replication already stopped or not active, treating as success")
-			// 	return nil
-			// }
+			// Handle idempotent case: if replication is not active, treat as success
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "not replicating") {
+				rlog.Info("Replication already stopped or not active, treating as success")
+				return nil
+			}
 			return err
 		}
 		rlog.Info("Stopped cross-region backup replication")
 		return nil
 	}
-
-	// Update replication parameters if replication is already enabled
-	// if desiredEnabled && latestEnabled {
-	// 	// Check if any parameters changed
-	// 	if delta.DifferentAt("Spec.BackupCrossRegionReplicationRetentionPeriod") ||
-	// 		delta.DifferentAt("Spec.BackupCrossRegionReplicationDestinationRegion") ||
-	// 		delta.DifferentAt("Spec.BackupCrossRegionReplicationKMSKeyID") {
-	// 		// Note: AWS doesn't support updating replication parameters directly.
-	// 		// We need to stop and restart replication with new parameters.
-	// 		rlog.Info("Replication parameter changes require stopping and restarting replication")
-
-	// 		// Stop current replication
-	// 		if latest.ko.Status.DBInstanceAutomatedBackupsReplications != nil &&
-	// 			len(latest.ko.Status.DBInstanceAutomatedBackupsReplications) > 0 {
-	// 			if latest.ko.Status.ACKResourceMetadata == nil || latest.ko.Status.ACKResourceMetadata.ARN == nil {
-	// 				return fmt.Errorf("DB instance ARN is required to update cross-region backup replication")
-	// 			}
-
-	// 			sourceARN := string(*latest.ko.Status.ACKResourceMetadata.ARN)
-	// 			stopInput := &svcsdk.StopDBInstanceAutomatedBackupsReplicationInput{
-	// 				SourceDBInstanceArn: &sourceARN,
-	// 			}
-
-	// 			// Stop must be called in the destination region
-	// 			var stopClient *svcsdk.Client
-	// 			if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
-	// 				destRegion := string(*desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion)
-	// 				destConfig := rm.clientcfg.Copy()
-	// 				destConfig.Region = destRegion
-	// 				stopClient = svcsdk.NewFromConfig(destConfig)
-	// 			} else {
-	// 				stopClient = rm.sdkapi
-	// 			}
-
-	// 			_, err := stopClient.StopDBInstanceAutomatedBackupsReplication(ctx, stopInput)
-	// 			rm.metrics.RecordAPICall("UPDATE", "StopDBInstanceAutomatedBackupsReplication", err)
-	// 			if err != nil {
-	// 				return fmt.Errorf("failed to stop replication for update: %w", err)
-	// 			}
-	// 		}
-
-	// 		// Start replication with new parameters
-	// 		if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion == nil {
-	// 			return fmt.Errorf("BackupCrossRegionReplicationDestinationRegion is required when BackupCrossRegionReplication is true")
-	// 		}
-
-	// 		sourceARN := string(*latest.ko.Status.ACKResourceMetadata.ARN)
-	// 		startInput := &svcsdk.StartDBInstanceAutomatedBackupsReplicationInput{
-	// 			SourceDBInstanceArn: &sourceARN,
-	// 		}
-
-	// 		// Set retention period (default 7)
-	// 		retentionPeriod := int32(7)
-	// 		if desired.ko.Spec.BackupCrossRegionReplicationRetentionPeriod != nil {
-	// 			retentionPeriod = int32(*desired.ko.Spec.BackupCrossRegionReplicationRetentionPeriod)
-	// 		}
-	// 		startInput.BackupRetentionPeriod = &retentionPeriod
-
-	// 		// Set KMS key ID if specified
-	// 		if desired.ko.Spec.BackupCrossRegionReplicationKMSKeyID != nil {
-	// 			startInput.KmsKeyId = desired.ko.Spec.BackupCrossRegionReplicationKMSKeyID
-	// 		}
-
-	// 		// Create a client for the destination region
-	// 		// The AWS SDK uses the client's configured region to determine where the API call targets
-	// 		var apiClient *svcsdk.Client
-	// 		if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
-	// 			destRegion := string(*desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion)
-	// 			destConfig := rm.clientcfg.Copy()
-	// 			destConfig.Region = destRegion
-	// 			apiClient = svcsdk.NewFromConfig(destConfig)
-	// 		} else {
-	// 			apiClient = rm.sdkapi
-	// 		}
-
-	// 		_, err := apiClient.StartDBInstanceAutomatedBackupsReplication(ctx, startInput)
-	// 		rm.metrics.RecordAPICall("UPDATE", "StartDBInstanceAutomatedBackupsReplication", err)
-	// 		if err != nil {
-	// 			return fmt.Errorf("failed to restart replication with new parameters: %w", err)
-	// 		}
-	// 		destRegionStr := "current region"
-	// 		if desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion != nil {
-	// 			destRegionStr = *desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion
-	// 		}
-	// 		rlog.Info("Restarted cross-region backup replication with new parameters", "destinationRegion", destRegionStr)
-	// 	}
-	// }
 
 	return nil
 }

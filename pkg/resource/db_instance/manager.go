@@ -110,7 +110,6 @@ func (rm *resourceManager) ReadOne(
 		return rm.onError(r, err)
 	}
 	
-	// TODO: This is getting double called maybe potentially due to a requeue
 	// Handle cross-region backup replication on every reconcile, even when there's no spec delta.
 	// This ensures we can enable replication once prerequisites (like automated backups) become active.
 	// Note: The resource passed to ReadOne() might be desired (in syncResource) or latest (in normal reconcile),
@@ -180,18 +179,6 @@ func (rm *resourceManager) Update(
 		// Should never happen... if it does, it's buggy code.
 		panic("resource manager's Update() method received resource with nil CR object")
 	}
-
-	// // Handle cross-region backup replication before standard update. Run this on
-	// // every reconcile so we can retry once prerequisites (like automated backups)
-	// // become active, not only when a spec delta is detected.
-	// rlog := ackrtlog.FromContext(ctx)
-	// rlog.Info("Update() called, checking cross-region backup replication",
-	// 	"desiredBackupCrossRegionReplication", desired.ko.Spec.BackupCrossRegionReplication,
-	// 	"desiredBackupCrossRegionReplicationDestinationRegion", desired.ko.Spec.BackupCrossRegionReplicationDestinationRegion,
-	// 	"deltaHasSpec", delta.DifferentAt("Spec"))
-	// if err := rm.manageCrossRegionBackupReplication(ctx, desired, latest, delta); err != nil {
-	// 	return rm.onError(desired, err)
-	// }
 
 	updated, err := rm.sdkUpdate(ctx, desired, latest, delta)
 	if err != nil {
